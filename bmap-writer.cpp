@@ -36,9 +36,6 @@
 #include <openssl/evp.h>
 #include <archive.h>
 
-#define CHECKSUM_LENGTH 64
-#define RANGE_LENGTH    19
-
 struct range_t {
     std::string checksum;
     size_t startBlock;
@@ -48,6 +45,52 @@ struct range_t {
 struct bmap_t {
     std::vector<range_t> ranges;
     size_t blockSize;
+};
+
+struct checksum_t {
+    EVP_MD_CTX *mdctx;
+    unsigned char checksum[EVP_MAX_MD_SIZE];
+    unsigned int checksum_len;
+};
+
+static void checksumDeinit(struct checksum_t* checksum)
+{
+    if (checksum->mdctx) {
+        EVP_MD_CTX_free(checksum->mdctx);
+        checksum->mdctx = nullptr;
+    }
+}
+
+static int checksumInit(struct checksum_t* checksum)
+{
+    int ret = -1;
+
+    checksum->checksum_len = 0;
+    checksum->mdctx = EVP_MD_CTX_new();
+    if (checksum->mdctx != nullptr) {
+        ret = EVP_DigestInit_ex(checksum->mdctx, EVP_sha256(), nullptr);
+    }
+
+    return ret;
+}
+
+static void checksumUpdate(struct checksum_t* checksum, const std::vector<char>& buffer, size_t size)
+{
+    EVP_DigestUpdate(checksum->mdctx, buffer.data(), size);
+}
+
+static void checksumFinish(struct checksum_t* checksum)
+{
+    EVP_DigestFinal_ex(checksum->mdctx, checksum->checksum, &checksum->checksum_len);
+}
+
+static std::string checksumGetString(struct checksum_t* checksum) {
+    std::ostringstream output;
+    output << std::hex;
+    for (unsigned int i = 0; i < checksum->checksum_len; ++i) {
+        output << std::setfill('0') << std::setw(2) << static_cast<unsigned int>(checksum->checksum[i]);
+    }
+    return output.str();
 };
 
 bmap_t parseBMap(const std::string &filename) {
@@ -96,26 +139,6 @@ bmap_t parseBMap(const std::string &filename) {
     return bmapData;
 }
 
-std::string computeSHA256(const std::vector<char>& buffer, size_t size) {
-    EVP_MD_CTX *mdctx;
-    unsigned char hash[EVP_MAX_MD_SIZE];
-    unsigned int hash_len;
-
-    mdctx = EVP_MD_CTX_new();
-    EVP_DigestInit_ex(mdctx, EVP_sha256(), NULL);
-    EVP_DigestUpdate(mdctx, buffer.data(), size);
-    EVP_DigestFinal_ex(mdctx, hash, &hash_len);
-    EVP_MD_CTX_free(mdctx);
-
-    std::ostringstream output;
-    output << std::hex;
-    for (unsigned int i = 0; i < hash_len; ++i) {
-        output << std::setfill('0') << std::setw(2) << static_cast<unsigned int>(hash[i]);
-    }
-
-    return output.str();
-}
-
 bool isDeviceMounted(const std::string &device) {
     std::ifstream mounts("/proc/mounts");
     std::string line;
@@ -148,6 +171,7 @@ void printBufferHex(const char *buffer, size_t size) {
 int BmapWriteImage(const std::string &imageFile, const bmap_t &bmap, const std::string &device) {
     static const size_t read_block_size = 16384;
     struct archive *a = nullptr;
+    checksum_t checksum;
     int dev_fd = -1;
     int ret = 0;
 
@@ -189,14 +213,18 @@ int BmapWriteImage(const std::string &imageFile, const bmap_t &bmap, const std::
         }
 
         for (const auto &range : bmap.ranges) {
+            const size_t outStart = range.startBlock * bmap.blockSize;
+            const size_t outEnd = ((range.endBlock + 1) * bmap.blockSize);
+
+            if (checksumInit(&checksum) < 0) {
+                throw std::string("Failed to init checksum engine");
+            }
+
             //std::cout << "Processing Range: startBlock=" << range.startBlock << ", endBlock=" << range.endBlock << std::endl;
 
             size_t bufferSize = (range.endBlock - range.startBlock + 1) * bmap.blockSize;
             std::vector<char> buffer(bufferSize);
             size_t outBytes = 0;
-
-            const size_t outStart = range.startBlock * bmap.blockSize;
-            const size_t outEnd = ((range.endBlock + 1) * bmap.blockSize);
 
             while (outBytes < bufferSize) {
                 ssize_t readData = archive_read_data(a, buffer.data() + outBytes, bufferSize - outBytes);
@@ -226,8 +254,11 @@ int BmapWriteImage(const std::string &imageFile, const bmap_t &bmap, const std::
                 decHead += chunkSize;
             }
 
+            checksumUpdate(&checksum, buffer, outBytes);
+
             // Compute and verify the checksum
-            std::string computedChecksum = computeSHA256(buffer, outBytes);
+            checksumFinish(&checksum);
+            std::string computedChecksum = checksumGetString(&checksum);
             if (computedChecksum != range.checksum) {
                 std::stringstream err;
                 err << "Checksum verification failed for range: " << range.startBlock << "-" << range.endBlock << std::endl;
@@ -241,6 +272,8 @@ int BmapWriteImage(const std::string &imageFile, const bmap_t &bmap, const std::
             if (pwrite(dev_fd, buffer.data(), outBytes, static_cast<off_t>(range.startBlock * bmap.blockSize)) < 0) {
                 throw std::string("Write to device failed");
             }
+
+            checksumDeinit(&checksum);
         }
 
         if (fsync(dev_fd) != 0) {
@@ -261,6 +294,8 @@ int BmapWriteImage(const std::string &imageFile, const bmap_t &bmap, const std::
     if (a != nullptr) {
         archive_read_free(a);
     }
+
+    checksumDeinit(&checksum);
 
     return ret;
 }
