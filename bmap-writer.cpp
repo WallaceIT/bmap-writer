@@ -48,7 +48,10 @@ struct range_t {
 
 struct bmap_t {
     std::vector<range_t> ranges;
+    size_t imageSize;
     size_t blockSize;
+    size_t blocksCount;
+    size_t mappedBlocksCount;
 };
 
 enum ChecksumMode {
@@ -115,14 +118,27 @@ bmap_t parseBMap(const std::string &filename) {
     xmlNodePtr root_element = xmlDocGetRootElement(doc);
     for (xmlNodePtr node = root_element->children; node; node = node->next) {
         if (node->type == XML_ELEMENT_NODE) {
-            if (strcmp(reinterpret_cast<const char *>(node->name), "BlockSize") == 0) {
-                xmlChar *blockSizeStr = xmlNodeGetContent(node);
-                bmapData.blockSize = static_cast<size_t>(std::stoul(reinterpret_cast<const char *>(blockSizeStr)));
-                xmlFree(blockSizeStr);
-                //std::cout << "BlockSize: " << bmapData.blockSize << std::endl;
-            } else if (strcmp(reinterpret_cast<const char *>(node->name), "BlockMap") == 0) {
+            std::string nodeName = std::string(reinterpret_cast<const char *>(node->name));
+            if (nodeName == std::string("ImageSize")) {
+                xmlChar *nodeStr = xmlNodeGetContent(node);
+                bmapData.imageSize = static_cast<size_t>(std::stoul(reinterpret_cast<const char *>(nodeStr)));
+                xmlFree(nodeStr);
+            } else if (nodeName == std::string("BlockSize")) {
+                xmlChar *nodeStr = xmlNodeGetContent(node);
+                bmapData.blockSize = static_cast<size_t>(std::stoul(reinterpret_cast<const char *>(nodeStr)));
+                xmlFree(nodeStr);
+            } else if (nodeName == std::string("BlocksCount")) {
+                xmlChar *nodeStr = xmlNodeGetContent(node);
+                bmapData.blocksCount = static_cast<size_t>(std::stoul(reinterpret_cast<const char *>(nodeStr)));
+                xmlFree(nodeStr);
+            } else if (nodeName == std::string("MappedBlocksCount")) {
+                xmlChar *nodeStr = xmlNodeGetContent(node);
+                bmapData.mappedBlocksCount = static_cast<size_t>(std::stoul(reinterpret_cast<const char *>(nodeStr)));
+                xmlFree(nodeStr);
+            } else if (nodeName == std::string("BlockMap")) {
                 for (xmlNodePtr rangeNode = node->children; rangeNode; rangeNode = rangeNode->next) {
-                    if (rangeNode->type == XML_ELEMENT_NODE && strcmp(reinterpret_cast<const char *>(rangeNode->name), "Range") == 0) {
+                    std::string rangeNodeName = std::string(reinterpret_cast<const char *>(rangeNode->name));
+                    if (rangeNode->type == XML_ELEMENT_NODE && rangeNodeName == std::string("Range")) {
                         xmlChar *checksum = xmlGetProp(rangeNode, reinterpret_cast<const xmlChar *>("chksum"));
                         xmlChar *range = xmlNodeGetContent(rangeNode);
 
@@ -449,11 +465,15 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    std::cout << "Image Size: " << bmap.imageSize << " bytes" << std::endl;
+    std::cout << "Blocks: " << bmap.mappedBlocksCount << " mapped over " << bmap.blocksCount << " total"
+              << " (" << (bmap.mappedBlocksCount * 100) / bmap.blocksCount << "%)" << std::endl;
+
     if (maxBufferSize > 0) {
         if (maxBufferSize < bmap.blockSize) {
             maxBufferSize = bmap.blockSize;
         }
-        std::cout << "Write buffer size: " << maxBufferSize << std::endl;
+        std::cout << "Write buffer size limited to " << maxBufferSize << " bytes" << std::endl;
     }
     int ret = BmapWriteImage(imageFile, bmap, device, maxBufferSize, checksumMode);
     if (ret != 0) {
