@@ -18,6 +18,7 @@
  * MA 02111-1307 USA
  */
 
+#include <cstdio>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -25,15 +26,16 @@
 #include <iomanip>
 #include <string>
 #include <chrono>
-#include <cstring>
+
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/types.h>
-#include <sys/stat.h>
-#include <errno.h>
+
 #include <libxml/parser.h>
 #include <libxml/tree.h>
+
 #include <openssl/evp.h>
+
 #include <archive.h>
 
 struct range_t {
@@ -44,7 +46,10 @@ struct range_t {
 
 struct bmap_t {
     std::vector<range_t> ranges;
+    size_t imageSize;
     size_t blockSize;
+    size_t blocksCount;
+    size_t mappedBlocksCount;
 };
 
 class Checksummer {
@@ -93,14 +98,27 @@ bmap_t parseBMap(const std::string &filename) {
     xmlNodePtr root_element = xmlDocGetRootElement(doc);
     for (xmlNodePtr node = root_element->children; node; node = node->next) {
         if (node->type == XML_ELEMENT_NODE) {
-            if (strcmp(reinterpret_cast<const char *>(node->name), "BlockSize") == 0) {
-                xmlChar *blockSizeStr = xmlNodeGetContent(node);
-                bmapData.blockSize = static_cast<size_t>(std::stoul(reinterpret_cast<const char *>(blockSizeStr)));
-                xmlFree(blockSizeStr);
-                //std::cout << "BlockSize: " << bmapData.blockSize << std::endl;
-            } else if (strcmp(reinterpret_cast<const char *>(node->name), "BlockMap") == 0) {
+            std::string nodeName = std::string(reinterpret_cast<const char *>(node->name));
+            if (nodeName == std::string("ImageSize")) {
+                xmlChar *nodeStr = xmlNodeGetContent(node);
+                bmapData.imageSize = static_cast<size_t>(std::stoul(reinterpret_cast<const char *>(nodeStr)));
+                xmlFree(nodeStr);
+            } else if (nodeName == std::string("BlockSize")) {
+                xmlChar *nodeStr = xmlNodeGetContent(node);
+                bmapData.blockSize = static_cast<size_t>(std::stoul(reinterpret_cast<const char *>(nodeStr)));
+                xmlFree(nodeStr);
+            } else if (nodeName == std::string("BlocksCount")) {
+                xmlChar *nodeStr = xmlNodeGetContent(node);
+                bmapData.blocksCount = static_cast<size_t>(std::stoul(reinterpret_cast<const char *>(nodeStr)));
+                xmlFree(nodeStr);
+            } else if (nodeName == std::string("MappedBlocksCount")) {
+                xmlChar *nodeStr = xmlNodeGetContent(node);
+                bmapData.mappedBlocksCount = static_cast<size_t>(std::stoul(reinterpret_cast<const char *>(nodeStr)));
+                xmlFree(nodeStr);
+            } else if (nodeName == std::string("BlockMap")) {
                 for (xmlNodePtr rangeNode = node->children; rangeNode; rangeNode = rangeNode->next) {
-                    if (rangeNode->type == XML_ELEMENT_NODE && strcmp(reinterpret_cast<const char *>(rangeNode->name), "Range") == 0) {
+                    std::string rangeNodeName = std::string(reinterpret_cast<const char *>(rangeNode->name));
+                    if (rangeNode->type == XML_ELEMENT_NODE && rangeNodeName == std::string("Range")) {
                         xmlChar *checksum = xmlGetProp(rangeNode, reinterpret_cast<const xmlChar *>("chksum"));
                         xmlChar *range = xmlNodeGetContent(rangeNode);
 
@@ -112,7 +130,7 @@ bmap_t parseBMap(const std::string &filename) {
                         }
 
                         bmapData.ranges.push_back(r);
-                        //std::cout << "Parsed Range: checksum=" << r.checksum << ", range=" << r.range << std::endl;
+
                         xmlFree(checksum);
                         xmlFree(range);
                     }
@@ -159,6 +177,8 @@ int BmapWriteImage(const std::string &imageFile, const bmap_t &bmap,
 
     try {
         size_t decHead = 0;
+        bool printProgress = isatty(fileno(stdout));
+        size_t progressBlocks100 = 0;
 
         dev_fd = open(device.c_str(), O_WRONLY | O_CREAT | O_SYNC, S_IRUSR | S_IWUSR);
         if (dev_fd < 0) {
@@ -252,6 +272,11 @@ int BmapWriteImage(const std::string &imageFile, const bmap_t &bmap,
                 checksum.update(buffer, outBytes);
 
                 writtenSize += outBytes;
+
+                if (printProgress) {
+                    progressBlocks100 += (outBytes * 100) / bmap.blockSize;
+                    std::cout << "Progress:" << std::setfill(' ') << std::setw(3) << (progressBlocks100 / bmap.mappedBlocksCount) << "%\r" << std::flush;
+                }
             }
 
             // Compute and verify the checksum
@@ -310,24 +335,32 @@ int main(int argc, const char *argv[]) {
         std::cerr << "Error: Device " << device << " is mounted. Please unmount it before proceeding." << std::endl;
         return 1;
     }
+
     auto start = std::chrono::high_resolution_clock::now();
+
     bmap_t bmap = parseBMap(bmapFile);
     if (bmap.blockSize == 0) {
         std::cerr << "BlockSize not found in BMAP file" << std::endl;
         return 1;
     }
 
+    std::cout << "Image Size: " << bmap.imageSize << " bytes" << std::endl;
+    std::cout << "Blocks: " << bmap.mappedBlocksCount << " mapped over " << bmap.blocksCount << " total"
+              << " (" << (bmap.mappedBlocksCount * 100) / bmap.blocksCount << "%)" << std::endl;
+
     if (maxBufferSize > 0) {
         if (maxBufferSize < bmap.blockSize) {
             maxBufferSize = bmap.blockSize;
         }
-        std::cout << "Write buffer size: " << maxBufferSize << std::endl;
+        std::cout << "Write buffer size limited to " << maxBufferSize << " bytes" << std::endl;
     }
+
     int ret = BmapWriteImage(imageFile, bmap, device, maxBufferSize);
     if (ret != 0) {
         std::cerr << "Failed to write image to device" << std::endl;
         return ret;
     }
+
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed = end - start;
     std::cout << "Process completed in " << std::fixed << std::setprecision(2) << elapsed.count() << " seconds." << std::endl;
