@@ -41,7 +41,8 @@
 
 struct range_t {
     std::string checksum;
-    std::string range;
+    size_t startBlock;
+    size_t endBlock;
 };
 
 struct bmap_t {
@@ -74,7 +75,10 @@ bmap_t parseBMap(const std::string &filename) {
 
                         range_t r;
                         r.checksum = reinterpret_cast<const char *>(checksum);
-                        r.range = reinterpret_cast<const char *>(range);
+
+                        if (sscanf(reinterpret_cast<const char *>(range), "%zu-%zu", &r.startBlock, &r.endBlock) == 1) {
+                            r.endBlock = r.startBlock;  // Handle single block range
+                        }
 
                         bmapData.ranges.push_back(r);
                         //std::cout << "Parsed Range: checksum=" << r.checksum << ", range=" << r.range << std::endl;
@@ -185,18 +189,14 @@ int BmapWriteImage(const std::string &imageFile, const bmap_t &bmap, const std::
         }
 
         for (const auto &range : bmap.ranges) {
-            size_t startBlock, endBlock;
-            if (sscanf(range.range.c_str(), "%zu-%zu", &startBlock, &endBlock) == 1) {
-                endBlock = startBlock;  // Handle single block range
-            }
-            //std::cout << "Processing Range: startBlock=" << startBlock << ", endBlock=" << endBlock << std::endl;
+            //std::cout << "Processing Range: startBlock=" << range.startBlock << ", endBlock=" << range.endBlock << std::endl;
 
-            size_t bufferSize = (endBlock - startBlock + 1) * bmap.blockSize;
+            size_t bufferSize = (range.endBlock - range.startBlock + 1) * bmap.blockSize;
             std::vector<char> buffer(bufferSize);
             size_t outBytes = 0;
 
-            const size_t outStart = startBlock * bmap.blockSize;
-            const size_t outEnd = ((endBlock + 1) * bmap.blockSize);
+            const size_t outStart = range.startBlock * bmap.blockSize;
+            const size_t outEnd = ((range.endBlock + 1) * bmap.blockSize);
 
             while (outBytes < bufferSize) {
                 ssize_t readData = archive_read_data(a, buffer.data() + outBytes, bufferSize - outBytes);
@@ -230,7 +230,7 @@ int BmapWriteImage(const std::string &imageFile, const bmap_t &bmap, const std::
             std::string computedChecksum = computeSHA256(buffer, outBytes);
             if (computedChecksum != range.checksum) {
                 std::stringstream err;
-                err << "Checksum verification failed for range: " << range.range << std::endl;
+                err << "Checksum verification failed for range: " << range.startBlock << "-" << range.endBlock << std::endl;
                 err << "Computed Checksum: " << computedChecksum << std::endl;
                 err << "Expected Checksum: " << range.checksum;
                 //std::cerr << "Buffer content (hex):" << std::endl;
@@ -238,7 +238,7 @@ int BmapWriteImage(const std::string &imageFile, const bmap_t &bmap, const std::
                 throw std::string(err.str());
             }
 
-            if (pwrite(dev_fd, buffer.data(), outBytes, static_cast<off_t>(startBlock * bmap.blockSize)) < 0) {
+            if (pwrite(dev_fd, buffer.data(), outBytes, static_cast<off_t>(range.startBlock * bmap.blockSize)) < 0) {
                 throw std::string("Write to device failed");
             }
         }
