@@ -25,12 +25,16 @@ Unlike the Yocto BMAP tool, `bmap-writer` is C++ based does not require Python a
 ## Usage
 
 ```
-bmap-writer [-b <max-buf-size>] <image-file> <bmap-file> <target-device>
+bmap-writer [-b <max-buf-size>] [-v] <image-file> <bmap-file> <target-device>
 ```
 
 The `<max-buf-size>` parameter can be used to limit the write buffer size on systems with limited RAM.
 It can be specified as a plain number or using the `K` (KiB), `M` (MiB), `G` (GiB) or `T` (TiB) suffixes.
 If not specified, the write buffer size will be variable and will depend on the size of the ranges specified inside the BAMP file.
+
+If `-n` is specified, the checksum verification is skipped.
+If `-w` is specified, the written data is read back and verified against the checksum contained inside the BMAP file.
+Otherwise, the checksum verification is performed on the data read from the image file.
 
 ## License
 
