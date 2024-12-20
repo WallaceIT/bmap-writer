@@ -51,6 +51,12 @@ struct bmap_t {
     size_t blockSize;
 };
 
+enum ChecksumMode {
+    NO_CHECKSUM,
+    CHECKSUM_READ,
+    CHECKSUM_WRITTEN,
+};
+
 struct checksum_t {
     EVP_MD_CTX *mdctx;
     unsigned char checksum[EVP_MAX_MD_SIZE];
@@ -154,8 +160,8 @@ bool isDeviceMounted(const std::string &device) {
     return false;
 }
 
-int BmapWriteImage(const std::string &imageFile, const bmap_t &bmap,
-                   const std::string &device, const size_t maxBufferSize = 0) {
+int BmapWriteImage(const std::string &imageFile, const bmap_t &bmap, const std::string &device,
+                   const size_t maxBufferSize = 0, const enum ChecksumMode checksumMode = CHECKSUM_READ) {
     static const size_t read_block_size = 16384;
     struct archive *a = nullptr;
     checksum_t checksum;
@@ -165,7 +171,7 @@ int BmapWriteImage(const std::string &imageFile, const bmap_t &bmap,
     try {
         size_t decHead = 0;
 
-        dev_fd = open(device.c_str(), O_WRONLY | O_CREAT | O_SYNC, S_IRUSR | S_IWUSR);
+        dev_fd = open(device.c_str(), O_RDWR | O_CREAT | O_SYNC, S_IRUSR | S_IWUSR);
         if (dev_fd < 0) {
             throw std::string("Unable to open or create target device");
         }
@@ -257,26 +263,49 @@ int BmapWriteImage(const std::string &imageFile, const bmap_t &bmap,
                     throw std::string("Write to device failed");
                 }
 
-                checksumUpdate(&checksum, buffer, outBytes);
+                if (checksumMode == CHECKSUM_READ) {
+                    // Verify checksum only on read data
+                    checksumUpdate(&checksum, buffer, outBytes);
+                }
 
                 writtenSize += outBytes;
             }
 
-            // Compute and verify the checksum
-            checksumFinish(&checksum);
-            std::string computedChecksum = checksumGetString(&checksum);
-            if (computedChecksum != range.checksum) {
-                std::stringstream err;
-                err << "Checksum verification failed for range: " << range.startBlock << "-" << range.endBlock << std::endl;
-                err << "Computed Checksum: " << computedChecksum << std::endl;
-                err << "Expected Checksum: " << range.checksum;
-                throw std::string(err.str());
-            }
-            checksumDeinit(&checksum);
-        }
+            if (checksumMode == CHECKSUM_WRITTEN) {
+                size_t readSize = 0;
 
-        if (fsync(dev_fd) != 0) {
-            throw std::string("fsync failed after all writes");
+                // Use writtenSize instead of rangeSize, as the very last block may be incomplete
+                // and incorrectly cause a checksum mismatch
+                while (readSize < writtenSize) {
+                    size_t bufferSize = (maxBufferSize > 0) ? maxBufferSize : writtenSize;
+                    if (bufferSize > (writtenSize - readSize)) {
+                        bufferSize = (writtenSize - readSize);
+                    }
+
+                    std::vector<char> buffer(bufferSize);
+
+                    ssize_t readData = pread(dev_fd, buffer.data(), buffer.size(), writeOffset + static_cast<off_t>(readSize));
+                    if (readData != buffer.size()) {
+                        throw std::string("Failed to re-read from device: ") + std::to_string(readData);
+                    }
+
+                    checksumUpdate(&checksum, buffer, buffer.size());
+
+                    readSize += static_cast<size_t>(readData);
+                }
+            }
+
+            if (checksumMode != NO_CHECKSUM) {
+                checksumFinish(&checksum);
+                std::string computedChecksum = checksumGetString(&checksum);
+                if (computedChecksum != range.checksum) {
+                    std::stringstream err;
+                    err << "Checksum verification failed for range: " << range.startBlock << "-" << range.endBlock << std::endl;
+                    err << "Computed Checksum: " << computedChecksum << std::endl;
+                    err << "Expected Checksum: " << range.checksum;
+                    throw std::string(err.str());
+                }
+            }
         }
 
         std::cout << "Finished writing image to device: " << device << std::endl;
@@ -353,19 +382,29 @@ static int getFreeMemory(size_t *memory) {
 
 static void printUsage(const char *progname) {
     std::cerr << "Usage: " << progname << " "
-              << "[-h] [-b <max-buf-size>] "
+              << "[-hsw] [-b <max-buf-size>] "
               << "<image-file> <bmap-file> <target-device>" << std::endl;
     std::cerr << std::endl;
-    std::cerr << "-b <max-buf-size>: Limit allocation size of write buffers to <max-buf-size>" << std::endl;
+    std::cerr << "-b <max-buf-size> : Limit allocation size of write buffers to <max-buf-size>" << std::endl;
+    std::cerr << "-n                : Skip checksum verification entirely" << std::endl;
+    std::cerr << "-w                : Verify written data against expected checksum" << std::endl;
 }
 
 int main(int argc, char *argv[]) {
     size_t maxBufferSize = 0;
+    enum ChecksumMode checksumMode = CHECKSUM_READ;
     int opt;
-    while ((opt = getopt(argc, argv, "b:h")) != -1) {
+
+    while ((opt = getopt(argc, argv, "b:hnw")) != -1) {
         switch (opt) {
             case 'b':
                 maxBufferSize = decodeSize(optarg);
+                break;
+             case 'n':
+                checksumMode = NO_CHECKSUM;
+                break;
+            case 'w':
+                checksumMode = CHECKSUM_WRITTEN;
                 break;
             case 'h':
                 // fallthrough
@@ -416,7 +455,7 @@ int main(int argc, char *argv[]) {
         }
         std::cout << "Write buffer size: " << maxBufferSize << std::endl;
     }
-    int ret = BmapWriteImage(imageFile, bmap, device, maxBufferSize);
+    int ret = BmapWriteImage(imageFile, bmap, device, maxBufferSize, checksumMode);
     if (ret != 0) {
         std::cerr << "Failed to write image to device: " << device << std::endl;
         return ret;
