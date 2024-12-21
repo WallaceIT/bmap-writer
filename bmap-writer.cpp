@@ -18,6 +18,7 @@
  * MA 02111-1307 USA
  */
 
+#include <cstdio>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -186,6 +187,8 @@ int BmapWriteImage(const std::string &imageFile, const bmap_t &bmap, const std::
 
     try {
         size_t decHead = 0;
+        bool printProgress = isatty(fileno(stdout));
+        unsigned int progress = 0;
 
         dev_fd = open(device.c_str(), O_RDWR | O_CREAT | O_SYNC, S_IRUSR | S_IWUSR);
         if (dev_fd < 0) {
@@ -285,6 +288,14 @@ int BmapWriteImage(const std::string &imageFile, const bmap_t &bmap, const std::
                 }
 
                 writtenSize += outBytes;
+
+                if (printProgress) {
+                    unsigned int newProgress = progress + static_cast<unsigned int>((outBytes * 100) / (bmap.mappedBlocksCount * bmap.blockSize));
+                    if (newProgress > progress) {
+                        progress = newProgress;
+                        std::cout << "Progress:" << std::setfill(' ') << std::setw(3) << progress << "%\r" << std::flush;
+                    }
+                }
             }
 
             if (checksumMode == CHECKSUM_WRITTEN) {
